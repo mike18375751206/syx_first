@@ -1,4 +1,29 @@
 
+#include "stm32f10x.h"
+#include "w5500.h"
+#include "dhcp.h"
+#include "socket.h"
+ #include "MQTTClient.h"
+ #include "mqtt_interface.h"
+
+/***************----- W5500 GPIO定义 -----***************/
+#define W5500_SCS		GPIO_Pin_4	//定义W5500的CS引脚	 
+#define W5500_SCS_PORT	GPIOA
+	
+#define W5500_RST		GPIO_Pin_3	//定义W5500的RST引脚
+#define W5500_RST_PORT	GPIOA
+
+#define W5500_INT		GPIO_Pin_4	//定义W5500的INT引脚
+#define W5500_INT_PORT	GPIOC
+extern wiz_NetInfo NetConf = {
+  {0x0c,0x29,0xab,0x7c,0x04,0x02},  // mac地址
+  {192,168,0,113},                  // 本地IP地址
+  {255,255,255,0},                  // 子网掩码
+  {192,168,0,1},                    // 网关地址
+  {192,168,0,1},                        // DNS服务器地址
+  NETINFO_STATIC                    // 使用静态IP
+};
+
 /********** 禁用半主机模式 **********/
 #pragma import(__use_no_semihosting)
  
@@ -14,9 +39,55 @@ void _sys_exit(int x)
 	
 }
 
+//Socket number defines
+#define TCP_SOCKET	0
+
+//Receive Buffer Size define
+#define BUFFER_SIZE	2048
+
+//Global variables
+unsigned char targetIP[4] = {139,196,135,135}; // mqtt server IP
+unsigned int targetPort = 1883; // mqtt server port
+unsigned char tempBuffer[BUFFER_SIZE] = {};
+
+struct opts_struct
+{
+	char* clientid;
+	int nodelimiter;
+	char* delimiter;
+	enum QoS qos;
+	char* username;
+	char* password;
+	char* host;
+	int port;
+	int showtopics;
+} opts ={ (char*)"stdout-subscriber", 0, (char*)"\n", QOS0, NULL, NULL, targetIP, targetPort, 0 };
+
+
+// @brief messageArrived callback function
+void messageArrived(MessageData* md)
+{
+	unsigned char testbuffer[100];
+	MQTTMessage* message = md->message;
+
+	if (opts.showtopics)
+	{
+		memcpy(testbuffer,(char*)message->payload,(int)message->payloadlen);
+		*(testbuffer + (int)message->payloadlen + 1) = "\n";
+		printf("%s\r\n",testbuffer);
+	}
+
+	if (opts.nodelimiter)
+		printf("%.*s", (int)message->payloadlen, (char*)message->payload);
+	else
+		printf("%.*s%s", (int)message->payloadlen, (char*)message->payload, opts.delimiter);
+}
+
+void delay_us(uint16_t time);
+
 void f2()
 {
-	loopback_tcpc(0x0, dataBuffer, dest_ip, dest_port);
+	
 }
 
 /*****************************************************
@@ -87,45 +158,334 @@ void NVIC_Config(void)
 	NVIC_Init(&NVIC_InitStructure);
 }
 
-/*****************************************************
-*function:	串口1中断服务函数，打印接收到的字节
-*param:			
-*return:		
-******************************************************/
-void USART1_IRQHandler(void)
+// @brief 1 millisecond Tick Timer setting
+void NVIC_configuration(void)
 {
-	static unsigned char buff[64];
-	static unsigned char n = 0;
-	unsigned char i;
+	NVIC_InitTypeDef NVIC_InitStructure;
+	SysTick_CLKSourceConfig(SysTick_CLKSource_HCLK);
+	SysTick_Config(72000);
+	NVIC_InitStructure.NVIC_IRQChannel = SysTick_IRQn;
+	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0; // Highest priority
+	NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
+	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+	NVIC_Init(&NVIC_InitStructure);
+}
+
+
+/*******************************************************************************
+* 函数名  : delay_us
+* 描述    : 延时函数
+* 输入    : us
+* 输出    : 无
+* 返回值  : 无
+* 说明    : 无
+*******************************************************************************/
+void delay_us(uint16_t time)
+{
+    uint16_t i,j;
+    for(i=0;i<time;i++)
+    {
+        j=32;
+        while(j>1)j--;
+    }
+}
+
+/*******************************************************************************
+* 函数名  : SPI_Configuration
+* 描述    : W5500 SPI初始化配置(STM32 SPI1)
+* 输入    : 无
+* 输出    : 无
+* 返回值  : 无
+* 说明    : 无
+*******************************************************************************/
+void SPI_Configuration(void)
+{
+	GPIO_InitTypeDef 	GPIO_InitStructure;
+	SPI_InitTypeDef   	SPI_InitStructure;	   
+
+  	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_SPI1 | RCC_APB2Periph_AFIO, ENABLE);	
+
+	/* 初始化SCK、MISO、MOSI引脚 */
+	GPIO_InitStructure.GPIO_Pin = GPIO_Pin_5 | GPIO_Pin_6 | GPIO_Pin_7;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP; // GPIO_Mode_Out_PP;   //GPIO_Mode_AF_PP;
+	GPIO_Init(GPIOA, &GPIO_InitStructure);
+	GPIO_SetBits(GPIOA,GPIO_Pin_5|GPIO_Pin_6|GPIO_Pin_7);//
+	GPIO_ResetBits(GPIOA,GPIO_Pin_5|GPIO_Pin_6|GPIO_Pin_7);
+	GPIO_SetBits(GPIOA,GPIO_Pin_5|GPIO_Pin_6|GPIO_Pin_7);
+	GPIO_ResetBits(GPIOA,GPIO_Pin_5|GPIO_Pin_6|GPIO_Pin_7);
+	GPIO_SetBits(GPIOA,GPIO_Pin_5|GPIO_Pin_6|GPIO_Pin_7);//
 	
-	if(USART_GetITStatus(USART1, USART_IT_RXNE) != RESET)		//判断是否为接收中断
+	/* 初始化RST引脚 */
+	GPIO_InitStructure.GPIO_Pin = W5500_RST;
+	GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+	GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP;
+	GPIO_Init(W5500_RST_PORT, &GPIO_InitStructure);
+	GPIO_SetBits(W5500_RST_PORT,W5500_RST);
+
+	/* 初始化CS引脚 */
+	GPIO_InitStructure.GPIO_Pin = W5500_SCS;
+	GPIO_InitStructure.GPIO_Speed=GPIO_Speed_50MHz;
+	GPIO_InitStructure.GPIO_Mode=GPIO_Mode_Out_PP;
+	GPIO_Init(W5500_SCS_PORT, &GPIO_InitStructure);
+	GPIO_SetBits(W5500_SCS_PORT, W5500_SCS);
+
+	/* 初始化配置STM32 SPI1 */
+	SPI_InitStructure.SPI_Direction=SPI_Direction_2Lines_FullDuplex;	//SPI设置为双线双向全双工
+	SPI_InitStructure.SPI_Mode=SPI_Mode_Master;							//设置为主SPI
+	SPI_InitStructure.SPI_DataSize=SPI_DataSize_8b;						//SPI发送接收8位帧结构
+	SPI_InitStructure.SPI_CPOL=SPI_CPOL_Low;							//时钟悬空低
+	SPI_InitStructure.SPI_CPHA=SPI_CPHA_1Edge;							//数据捕获于第1个时钟沿
+	SPI_InitStructure.SPI_NSS=SPI_NSS_Soft;								//NSS由外部管脚管理
+	SPI_InitStructure.SPI_BaudRatePrescaler=SPI_BaudRatePrescaler_2;	//波特率预分频值为2
+	SPI_InitStructure.SPI_FirstBit=SPI_FirstBit_MSB;					//数据传输从MSB位开始
+	SPI_InitStructure.SPI_CRCPolynomial=7;								//CRC多项式为7
+	SPI_Init(SPI1,&SPI_InitStructure);									//根据SPI_InitStruct中指定的参数初始化外设SPI1寄存器
+
+	SPI_Cmd(SPI1,ENABLE);	//STM32使能SPI1
+}
+
+
+
+/*******************************************************************************
+* 函数名  : System_Initialization
+* 描述    : STM32系统初始化函数(初始化STM32时钟及外设)
+* 输入    : 无
+* 输出    : 无
+* 返回    : 无 
+* 说明    : 无
+*******************************************************************************/
+void System_Initialization(void)
+{
+	SystemInit();	// 配置系统时钟为72M 
+	SPI_Configuration();		//W5500 SPI初始化配置(STM32 SPI1)
+}
+
+
+/*******************************************************************************
+* 函数名  : W5500_Hardware_Reset
+* 描述    : 硬件复位W5500
+* 输入    : 无
+* 输出    : 无
+* 返回值  : 无
+* 说明    : W5500的复位引脚保持低电平至少500us以上,才能重围W5500
+*******************************************************************************/
+void W5500_Hardware_Reset(void)
+{
+	GPIO_ResetBits(W5500_RST_PORT, W5500_RST);//复位引脚拉低
+	delay_us(50);
+	GPIO_SetBits(W5500_RST_PORT, W5500_RST);//复位引脚拉高
+	delay_us(200);
+}
+/*******************************************************************************
+* 函数名  : cs_select
+* 描述    : 片选选择
+* 输入    : 无
+* 输出    : 无
+* 返回值  : 无
+* 说明    : 置W5500的SCS为低电平
+*******************************************************************************/
+void 	cs_select(void)            
+{
+	GPIO_ResetBits(W5500_SCS_PORT, W5500_SCS);//置W5500的SCS为低电平
+}
+/*******************************************************************************
+* 函数名  : cs_deselect
+* 描述    : 片选取消
+* 输入    : 无
+* 输出    : 无
+* 返回值  : 无
+* 说明    : 置W5500的SCS为高电平
+*******************************************************************************/
+void 	cs_deselect(void)          
+{
+	GPIO_SetBits(W5500_SCS_PORT, W5500_SCS);//置W5500的SCS为高电平
+}
+
+
+/*******************************************************************************
+* 函数名  : SPI1_Send_Byte
+* 描述    : SPI1发送1个字节数据
+* 输入    : dat:待发送的数据
+* 输出    : 无
+* 返回值  : 无
+* 说明    : 无
+*******************************************************************************/
+void SPI1_Send_Byte(uint8_t dat)
+{
+	while(SPI_I2S_GetFlagStatus(SPI1, SPI_I2S_FLAG_TXE) == RESET);
+	SPI_I2S_SendData(SPI1,dat);//写1个字节数据
+	while (SPI_I2S_GetFlagStatus(SPI1, SPI_I2S_FLAG_RXNE) == RESET);
+	SPI_I2S_ReceiveData(SPI1);
+}
+
+/*******************************************************************************
+* 函数名  : SPI1_Read_Byte
+* 描述    : SPI1读取1个字节数据
+* 输入    : 无
+* 输出    : 无
+* 返回值  : 读取到的一个字节数据
+* 说明    : 无
+*******************************************************************************/
+uint8_t SPI1_Read_Byte(void)
+{
+	uint8_t ret;
+	while(SPI_I2S_GetFlagStatus(SPI1, SPI_I2S_FLAG_TXE) == RESET);
+	SPI_I2S_SendData(SPI1,0x00);//写1个字节数据
+	while (SPI_I2S_GetFlagStatus(SPI1, SPI_I2S_FLAG_RXNE) == RESET);
+	ret = SPI_I2S_ReceiveData(SPI1);
+	return ret;
+}
+
+
+/*******************************************************************************
+* 函数名  : SPI1_Send_nByte
+* 描述    : SPI1发送n个字节数据
+* 输入    : *dat_ptr:待写入数据缓冲区指针,len:待写入的数据长度
+* 输出    : 无
+* 返回值  : 无
+* 说明    : 无
+*******************************************************************************/
+void SPI1_Send_nByte(uint8_t *dat_ptr, uint16_t len)
+{
+	uint8_t i;
+	for(i=0;i<len;i++)//循环将缓冲区的size个字节数据写入W5500
 	{
-		buff[n++] = USART1->DR;																//读取接收到的字节数据
- 
-		if(n == 64)
-		{
-			n = 0;
-		}
-	}
-	if(USART_GetITStatus(USART1, USART_IT_IDLE) != RESET)		//判断是否为空闲中断
-	{
-		USART1->DR;						//读DR，清标志
-		
-		printf("%d characters:\r\n", n);
-		for(i=0; i<n; i++)
-		{
-			printf("buff[%d] = 0x%02hhx\r\n", i, buff[i]);	//输出十六进制，保留最低两位，不够补0
-		}
-		n = 0;
+		SPI1_Send_Byte(*dat_ptr++);//写一个字节数据
 	}
 }
 
-int main()
+/*******************************************************************************
+* 函数名  : SPI1_Read_nByte
+* 描述    :  SPI1接收n个字节数据
+* 输入    : *dat_ptr:待写入数据缓冲区指针,len:待写入的数据长度
+* 输出    : 无
+* 返回值  : 无
+* 说明    : 无
+*******************************************************************************/
+void SPI1_Read_nByte(uint8_t *dat_ptr, uint16_t len)
 {
+	uint8_t i;
+	for(i=0;i<len;i++)//循环将缓冲区的len个字节数据读入dat_ptr
+	{
+		SPI1_Send_Byte(0x00);  //发送一个哑数据
+		*dat_ptr++ = SPI_I2S_ReceiveData(SPI1);
+	}
+}
+
+
+/*******************************************************************************
+* 函数名  : RegisterW5500Func
+* 描述    : 注册5500函数
+* 输入    : 无
+* 输出    : 无
+* 返回值  : 无
+* 说明    : 注册5500函数
+*******************************************************************************/
+void RegisterW5500Func(void)          
+{
+	// 注册驱动函数
+  reg_wizchip_spi_cbfunc(SPI1_Read_Byte,SPI1_Send_Byte);
+  //reg_wizchip_spiburst_cbfunc(SPI1_Read_nByte,SPI1_Send_nByte);
+  reg_wizchip_cs_cbfunc(cs_select,cs_deselect);
+}
+
+void my_ip_assign(void)
+{
+	
+   getIPfromDHCP(NetConf.ip);
+   getGWfromDHCP(NetConf.gw);
+   getSNfromDHCP(NetConf.sn);
+   getDNSfromDHCP(NetConf.dns);
+   NetConf.dhcp = NETINFO_DHCP;
+	
+}
+void my_ip_conflict(void)
+{
+    //printf("CONFLICT IP from DHCP\r\n"); 需要注释，不然编译虽能通过但是调试不通
+    //halt or reset or any...
+    while(1); // this example is halt.
+}
+
+void f1()
+{
+	Network n;
+	MQTTClient c;
+
+	NewNetwork(&n, TCP_SOCKET);
+	ConnectNetwork(&n, targetIP, targetPort);
+	MQTTClientInit(&c,&n,1000,buf,100,tempBuffer,2048);
+
+	MQTTPacket_connectData data = MQTTPacket_connectData_initializer;
+	data.willFlag = 0;
+	data.MQTTVersion = 3;
+	data.clientID.cstring = opts.clientid;
+	data.username.cstring = opts.username;
+	data.password.cstring = opts.password;
+
+	data.keepAliveInterval = 60;
+	data.cleansession = 1;
+
+	rc = MQTTConnect(&c, &data);
+	printf("Connected %d\r\n", rc);
+	opts.showtopics = 1;
+
+	printf("Subscribing to %s\r\n", "hello/wiznet");
+	rc = MQTTSubscribe(&c, "hello/wiznet", opts.qos, messageArrived);
+	printf("Subscribed %d\r\n", rc);
+
+    while(1)
+    {
+    	MQTTYield(&c, data.keepAliveInterval);
+    }
+}
+
+/*******************************************************************************
+* 函数名  : configNet
+* 描述    : W5500芯片复位
+* 输入    : 无
+* 输出    : 无
+* 返回值  : 无
+* 说明    : W5500芯片复位
+*******************************************************************************/
+void configNet(){
+  wiz_NetInfo conf;
+	uint8_t buf[200];
+	setSHAR(NetConf.mac); //set MAC
+	
+  // 配置网络地址
+  ctlnetwork(CN_SET_NETINFO,(void *)&NetConf);
+  // 回读
+  ctlnetwork(CN_GET_NETINFO,(void *)&conf);
+  if(memcmp(&conf,&NetConf,sizeof(wiz_NetInfo)) == 0){
+    // 配置成功
+	
+		wiz_NetTimeout to;
+		to.retry_cnt = 8;   // 重试次数，默认8次
+		to.time_100us = 2000; // 超时时间，默认2000*100us = 200ms
+		wizchip_settimeout(&to);
+		DNS_init(0,buf);
+		//uint8_t * dns_ip =  &(NetConf.dns);
+		uint8_t * name = "m2m.eclipse.org";
+		uint8_t ip_from_dns[4] = {0,0,0,0};
+		
+
+  }else{
+    // 配置失败
+  }
+}
+
+
+int main(void)
+{
+	System_Initialization();	//STM32系统初始化函数(初始化STM32时钟及外设)
 	USART1_Init(115200);
 	NVIC_Config();
-	printf("Hello, world!\r\n");
-	printf("Please enter any character:\r\n");
-	f2();
-	while(1);
+	W5500_Hardware_Reset();
+	RegisterW5500Func();
+	uint8_t ar[16] = {2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2}; // 全部收发缓冲区设为2KB(默认)
+	ctlwizchip(CW_INIT_WIZCHIP,ar);
+	configNet();
+	f1();
+	
 }
