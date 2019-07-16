@@ -5,7 +5,8 @@
 #include "socket.h"
  #include "MQTTClient.h"
  #include "mqtt_interface.h"
- //#include "loopback.h"
+ #include "FreeRTOS.h"
+ #include "task.h"
 
 
 /***************----- W5500 GPIO定义 -----***************/
@@ -44,17 +45,31 @@ void _sys_exit(int x)
 	
 }
 
+/* 创建任务句柄 */
+static TaskHandle_t connect_Handle = NULL;
+ /* 创建任务句柄 */
+static TaskHandle_t AppTask_Handle = NULL;
+
+
 //Socket number defines
 #define TCP_SOCKET	0
+
 
 //Receive Buffer Size define
 #define BUF_SIZE 2048
 
 //Global variables
+int tcp_state = 0;
+int mqtt_state = 0;  //mqtt_state 1 is connect,0 is unconnect
 //unsigned char targetIP[4] = {139,196,135,135}; // mqtt server IP  
 unsigned char targetIP[4] = {192,168,0,101}; // mqtt server IP 
 unsigned int targetPort = 1883; // mqtt server port
 unsigned char tempBuffer[BUF_SIZE];
+unsigned char sbuf[200];
+Network n;
+MQTTClient c;
+char* subTopic = "/a17b2zgOxYj/mike_001/user/mytopic1";
+char* pubTopic = "/a17b2zgOxYj/mike_001/user/mytopic1";
 
 uint8_t loopback_tcpc1();
 
@@ -166,37 +181,30 @@ void NVIC_Config(void)
 	NVIC_Init(&NVIC_InitStructure);
 }
 
-// @brief 1 millisecond Tick Timer setting
-void NVIC_configuration(void)
-{
-	NVIC_InitTypeDef NVIC_InitStructure;
-	SysTick_CLKSourceConfig(SysTick_CLKSource_HCLK);
-	SysTick_Config(72000);
-	NVIC_InitStructure.NVIC_IRQChannel = SysTick_IRQn;
-	NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0; // Highest priority
-	NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
-	NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
-	NVIC_Init(&NVIC_InitStructure);
-}
 
 
-/*******************************************************************************
-* 函数名  : delay_us
-* 描述    : 延时函数
-* 输入    : us
-* 输出    : 无
-* 返回值  : 无
-* 说明    : 无
-*******************************************************************************/
+
 void delay_us(uint16_t time)
-{
-    uint16_t i,j;
-    for(i=0;i<time;i++)
-    {
-        j=32;
-        while(j>1)j--;
-    }
+{    
+   uint16_t i=0;  
+   while(time--)
+   {
+      i=10;  //自己定义
+      while(i--) ;    
+   }
 }
+
+//毫秒级的延时
+void delay_ms(uint16_t time)
+{    
+   uint16_t i=0;  
+   while(time--)
+   {
+      i=12000;  //自己定义
+      while(i--) ;    
+   }
+}
+
 
 /*******************************************************************************
 * 函数名  : SPI_Configuration
@@ -245,7 +253,7 @@ void SPI_Configuration(void)
 	SPI_InitStructure.SPI_CPOL=SPI_CPOL_Low;							//时钟悬空低
 	SPI_InitStructure.SPI_CPHA=SPI_CPHA_1Edge;							//数据捕获于第1个时钟沿
 	SPI_InitStructure.SPI_NSS=SPI_NSS_Soft;								//NSS由外部管脚管理
-	SPI_InitStructure.SPI_BaudRatePrescaler=SPI_BaudRatePrescaler_2;	//波特率预分频值为2
+	SPI_InitStructure.SPI_BaudRatePrescaler=SPI_BaudRatePrescaler_4;	//波特率预分频值为4
 	SPI_InitStructure.SPI_FirstBit=SPI_FirstBit_MSB;					//数据传输从MSB位开始
 	SPI_InitStructure.SPI_CRCPolynomial=7;								//CRC多项式为7
 	SPI_Init(SPI1,&SPI_InitStructure);									//根据SPI_InitStruct中指定的参数初始化外设SPI1寄存器
@@ -281,9 +289,9 @@ void System_Initialization(void)
 void W5500_Hardware_Reset(void)
 {
 	GPIO_ResetBits(W5500_RST_PORT, W5500_RST);//复位引脚拉低
-	delay_us(50);
+	delay_ms(1);
 	GPIO_SetBits(W5500_RST_PORT, W5500_RST);//复位引脚拉高
-	delay_us(200);
+	delay_ms(1);
 }
 /*******************************************************************************
 * 函数名  : cs_select
@@ -381,6 +389,8 @@ void SPI1_Read_nByte(uint8_t *dat_ptr, uint16_t len)
 	}
 }
 
+extern void	vPortEnterCritical();
+extern void	vPortExitCritical();
 
 /*******************************************************************************
 * 函数名  : RegisterW5500Func
@@ -394,6 +404,9 @@ void RegisterW5500Func(void)
 {
 	// 注册驱动函数
   reg_wizchip_spi_cbfunc(SPI1_Read_Byte,SPI1_Send_Byte);
+  
+  reg_wizchip_cris_cbfunc(vPortEnterCritical, vPortExitCritical);
+  
   //reg_wizchip_spiburst_cbfunc(SPI1_Read_nByte,SPI1_Send_nByte);
   reg_wizchip_cs_cbfunc(cs_select,cs_deselect);
 }
@@ -404,55 +417,9 @@ void DefaultMesHand(MessageData* mesdata)
 	printf("data:%s\r\n",mesdata->message->payload);
 }
 
+
 void f1()
 {
-	memset(tempBuffer, 0, BUF_SIZE); 
-	int rc = 0;
-	int con = 1;
-	int sub = 1;
-	unsigned char buf[200];
-	Network n;
-	MQTTClient c;
-	NewNetwork(&n, TCP_SOCKET);
-	c.defaultMessageHandler = DefaultMesHand;
-	MQTTClientInit(&c,&n,1000,buf,200,tempBuffer,2048);
-
-	MQTTPacket_connectData data = MQTTPacket_connectData_initializer;
-	data.willFlag = 0;
-	data.MQTTVersion = 3;
-	data.clientID.cstring = opts.clientid;
-	data.username.cstring = opts.username;
-	data.password.cstring = opts.password;
-	data.keepAliveInterval = 300;
-	data.cleansession = 1;
-	opts.showtopics = 1;
-	while(1)
-	{
-		//loopback_tcpc(0, buf, targetIP, targetPort);
-
-		///*
-		rc = loopback_tcpc1();
-		if(con&&(rc&SOCK_ESTABLISHED))
-		{
-			rc = MQTTConnect(&c, &data);
-			printf("Connected %d\r\n", rc);
-			if(rc!=FAILURE)
-				con = 0;
-		}
-		if(sub&&(con==0))
-		{
-			printf("Subscribing to %s\r\n", "/a17b2zgOxYj/mike_001/user/mytopic1");
-			rc = MQTTSubscribe(&c, "/a17b2zgOxYj/mike_001/user/mytopic1", opts.qos, messageArrived);
-			printf("Subscribed %d\r\n", rc);
-			if(rc!=FAILURE)
-				sub = 0;
-		}
-		if(!sub)
-		{
-			MQTTYield(&c, data.keepAliveInterval);
-		}
-		//*/
-	}
 	
 }
 
@@ -464,44 +431,58 @@ void f1()
 * 返回值  : 无
 * 说明    : W5500芯片复位
 *******************************************************************************/
-void configNet(){
-  wiz_NetInfo conf;
-	uint8_t buf[200];
-	setSHAR(NetConf.mac); //set MAC
-	
-  // 配置网络地址
-  ctlnetwork(CN_SET_NETINFO,(void *)&NetConf);
-  // 回读
-  ctlnetwork(CN_GET_NETINFO,(void *)&conf);
-  if(memcmp(&conf,&NetConf,sizeof(wiz_NetInfo)) == 0){
-    // 配置成功
-	
-		wiz_NetTimeout to;
-		to.retry_cnt = 8;   // 重试次数，默认8次
-		to.time_100us = 2000; // 超时时间，默认2000*100us = 200ms
-		wizchip_settimeout(&to);
-		DNS_init(0,buf);
-		//uint8_t * dns_ip =  &(NetConf.dns);
-		uint8_t * name = "m2m.eclipse.org";
-		uint8_t ip_from_dns[4] = {0,0,0,0};
-		
-
-  }else{
-    // 配置失败
-  }
+void configNet()
+{
+	W5500_Hardware_Reset();
+	uint8_t ar[16] = {2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2}; // 全部收发缓冲区设为2KB(默认)
+	ctlwizchip(CW_INIT_WIZCHIP,ar);
+	uint8_t linkStatus;
+	uint8_t ret;
+	printf("check linkstatus*************************\r\n");
+	do
+	{
+		ret = ctlwizchip(CW_GET_PHYLINK, (void*) linkStatus);
+		if(ret!=0||linkStatus!=PHY_LINK_ON)
+		{
+			printf("linkstatus is :%x\r\n",linkStatus);
+			delay_ms(1000);
+		}
+	}
+	while(ret==0&&linkStatus==PHY_LINK_ON);
+	printf("*************************\r\n");
+	printf("config netinfo****************\r\n");
+	wiz_NetInfo conf;
+	do
+	{
+		setSHAR(NetConf.mac); //set MAC
+		// 配置网络地址
+		ctlnetwork(CN_SET_NETINFO,(void *)&NetConf);
+		// 回读
+		ctlnetwork(CN_GET_NETINFO,(void *)&conf);
+		if(memcmp(&conf,&NetConf,sizeof(wiz_NetInfo)) != 0)
+		{
+			printf("config netinfo fail \r\n");
+			delay_ms(1000);
+		}
+	}
+	while(memcmp(&conf,&NetConf,sizeof(wiz_NetInfo)) == 0)
+	printf("config netinfo success \r\n");nfo)) == 0){
+	wiz_NetTimeout to;
+	to.retry_cnt = 8;   // 重试次数，默认8次
+	to.time_100us = 2000; // 超时时间，默认2000*100us = 200ms
+	wizchip_settimeout(&to);
 }
 
 
 
 uint8_t loopback_tcpc1()
 {
-	 static uint16_t any_port =   50000;
+   static uint16_t any_port =   50000;
    switch(getSn_SR(TCP_SOCKET))
    {
       case SOCK_ESTABLISHED :
          if(getSn_IR(TCP_SOCKET) & Sn_IR_CON)	// Socket n interrupt register mask; TCP CON interrupt = connection with peer is successful
          {
-			printf("Connected");
 			setSn_IR(TCP_SOCKET, Sn_IR_CON);  // this interrupt should be write the bit cleared to '1'
          }
 		 return SOCK_ESTABLISHED;
@@ -510,7 +491,6 @@ uint8_t loopback_tcpc1()
          disconnect(TCP_SOCKET);
          break;
       case SOCK_INIT :
-    	 printf("Try to connect");
     	 connect(TCP_SOCKET, targetIP, targetPort);
          break;
       case SOCK_CLOSED:
@@ -525,17 +505,124 @@ uint8_t loopback_tcpc1()
 
 
 
+static void tcpTask(void* parameter)
+{	
+    while (1)
+    {
+		taskENTER_CRITICAL();
+		tcp_state = loopback_tcpc1();
+		if(tcp_state==SOCK_ESTABLISHED)
+		{
+			if(mqtt_state==0)
+			{
+				printf("tcp Connected %d\r\n", rc);
+				if(MQTTConnect(&c, &data)!=FAILURE)
+				{
+					mqtt_state = 1;
+					MQTTSubscribe(&c, subTopic, opts.qos, messageArrived);
+				}
+			}
+			
+		}
+		else
+		{
+			mqtt_state = 0;
+		}
+		taskEXIT_CRITICAL();
+		const portTickType xDelay = pdMS_TO_TICKS(200);
+		vTaskDelay( xDelay );
+    }
+}
+
+
+static void printInfoTask(void* parameter)
+{	
+    while (1)
+    {
+		taskENTER_CRITICAL();
+		printf("tcp_state=%x, mqtt_state=%x\r\n",tcp_state,mqtt_state);
+		taskEXIT_CRITICAL();
+		const portTickType xDelay = pdMS_TO_TICKS(10000);
+		vTaskDelay( xDelay );
+    }
+}
+
+static void subTask(void* parameter)
+{	
+    while (1)
+    {
+		if(tcp_state==SOCK_ESTABLISHED&&mqtt_state==1)
+		{
+			MQTTYield(&c, 300);
+		}
+    }
+}
+
+static void pubTask(void* parameter)
+{	
+    while (1)
+    {
+		if(tcp_state==SOCK_ESTABLISHED&&mqtt_state==1)
+		{
+			MQTTPublish  ( &n,    pubTopic  ,    "ttcc\n\r" ); 
+		}
+		const portTickType xDelay = pdMS_TO_TICKS(1000);
+		vTaskDelay( xDelay );
+    }
+}
+
+
 int main(void)
 {
 	System_Initialization();	//STM32系统初始化函数(初始化STM32时钟及外设)
 	USART1_Init(115200);
 	NVIC_Config();
-	NVIC_configuration();
-	W5500_Hardware_Reset();
 	RegisterW5500Func();
-	uint8_t ar[16] = {2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2}; // 全部收发缓冲区设为2KB(默认)
-	ctlwizchip(CW_INIT_WIZCHIP,ar);
+	//初始化配置w5500
 	configNet();
-	f1();
+	/*组装mqtt链接数据*/
+	memset(tempBuffer, 0, BUF_SIZE); 
+	NewNetwork(&n, TCP_SOCKET);
+	c.defaultMessageHandler = DefaultMesHand;
+	MQTTClientInit(&c,&n,1000,sbuf,200,tempBuffer,2048);
+	MQTTPacket_connectData data = MQTTPacket_connectData_initializer;
+	data.willFlag = 0;
+	data.MQTTVersion = 3;
+	data.clientID.cstring = opts.clientid;
+	data.username.cstring = opts.username;
+	data.password.cstring = opts.password;
+	data.keepAliveInterval = 30000;
+	data.cleansession = 1;
+	opts.showtopics = 1;
+	xTaskCreate((TaskFunction_t )tcpTask,  /* 任务入口函数 */
+                        (const char*    )"tcpTask",/* 任务名字 */
+                        (uint16_t       )512,  /* 任务栈大小 */
+                        (void*          )NULL,/* 任务入口函数参数 */
+                        (UBaseType_t    )2, /* 任务的优先级 */
+                        (TaskHandle_t*  )&AppTask_Handle);/* 任务控制块指针 */ 
+	xTaskCreate((TaskFunction_t )printInfoTask,  /* 任务入口函数 */
+                        (const char*    )"printInfoTask",/* 任务名字 */
+                        (uint16_t       )512,  /* 任务栈大小 */
+                        (void*          )NULL,/* 任务入口函数参数 */
+                        (UBaseType_t    )1, /* 任务的优先级 */
+                        (TaskHandle_t*  )&AppTask_Handle);/* 任务控制块指针 */
+	xTaskCreate((TaskFunction_t )subTask,  /* 任务入口函数 */
+                        (const char*    )"subTask",/* 任务名字 */
+                        (uint16_t       )512,  /* 任务栈大小 */
+                        (void*          )NULL,/* 任务入口函数参数 */
+                        (UBaseType_t    )2, /* 任务的优先级 */
+                        (TaskHandle_t*  )&AppTask_Handle);/* 任务控制块指针 */ 
+	xTaskCreate((TaskFunction_t )pubTask,  /* 任务入口函数 */
+                        (const char*    )"pubTask",/* 任务名字 */
+                        (uint16_t       )512,  /* 任务栈大小 */
+                        (void*          )NULL,/* 任务入口函数参数 */
+                        (UBaseType_t    )2, /* 任务的优先级 */
+                        (TaskHandle_t*  )&AppTask_Handle);/* 任务控制块指针 */
+	printf("start\r\n");
+	vTaskStartScheduler();
+	while(1)
+	{
+		
+	}
 	
 }
